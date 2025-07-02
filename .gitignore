@@ -1,0 +1,11 @@
+*.out
+*.log
+*.bam
+*.vcf
+*.tmp
+*.sam
+*.idx
+*.gz
+*.zip
+.DS_Store
+__pycache__/

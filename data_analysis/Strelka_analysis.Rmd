@@ -1,0 +1,548 @@
+---
+title: "Mutation Analysis in BRCA Project"
+author: "Pedro Silvestre"
+date: "`r Sys.Date()`"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load Required Libraries
+
+```{r}
+library(vcfR)
+library(dplyr)
+library(ggplot2)
+library(stringr)
+library(tidyr)
+library(ggtext)
+library(RColorBrewer)
+library(patchwork)
+library(forcats)
+library(gtools)
+library(cowplot)
+library(BSgenome)
+library(BSgenome.Hsapiens.UCSC.hg38)
+```
+
+## Data Loading
+
+```{r}
+strelka_c2040 <- read.vcfR(
+  "/Users/pedrosilvestre/Desktop/NFS_Pedro/BRCA_project/strelka/C2040/StrelkaSomaticWorkflow/results/variants/somatic.snvs.vcf.gz",
+  verbose = FALSE
+)
+
+strelka_c2041 <- read.vcfR(
+  "/Users/pedrosilvestre/Desktop/NFS_Pedro/BRCA_project/strelka/C2041/StrelkaSomaticWorkflow/results/variants/somatic.snvs.vcf.gz",
+  verbose = FALSE
+)
+```
+
+## Data Processing: Strelka
+
+```{r}
+process_strelka <- function(df) {
+  df_NAlt<-data.frame(N=1:nrow(df@fix),Chr=df@fix[,1], Pos=as.numeric(df@fix[,2]),
+                      NAlt=lengths(strsplit(df@fix[,5],",")) )
+  
+  AF<-extract.gt(df, element='FREQ', as.numeric=TRUE)
+  DP<-extract.gt(df, element='DP', as.numeric=TRUE)
+  
+  VAF<-extract.gt(df, element='VAF', as.numeric=TRUE)
+  
+  
+  format_field <- as.list(strsplit(df@fix[, "INFO"], ";"))
+  
+  sgt_values <- sapply(format_field, function(x) {
+    # Find the element that starts with "SGT="
+    sgt_entry <- grep("^SGT=", x, value = TRUE)
+    # Remove the "SGT=" prefix to keep only the value
+    if (length(sgt_entry) > 0) {
+      sub("^SGT=", "", sgt_entry)
+    } else {
+      NA
+    }
+  })
+  
+  
+  df_NAlt<-data.frame(N=1:nrow(df@fix),Chr=df@fix[,1], Pos=as.numeric(df@fix[,2]), Ref=df@fix[,4], Alt=df@fix[,5],
+                      SGT = sgt_values, NAlt=lengths(strsplit(df@fix[,5],",")), Filter=df@fix[,"FILTER"])
+  
+  
+  
+  filtered_sgt_values <- sgt_values[!grepl("^(.+)->\\1$", sgt_values)]
+  
+  
+  DP<-extract.gt(df, element='DP', as.numeric=TRUE) #this collects the DP for each
+  FDP<-extract.gt(df, element='FDP', as.numeric=TRUE) #Reads filtered out
+  AU<-extract.gt(df, element='AU', as.numeric=TRUE)
+  CU<-extract.gt(df, element='CU', as.numeric=TRUE)
+  GU<-extract.gt(df, element='GU', as.numeric=TRUE)
+  TU<-extract.gt(df, element='TU', as.numeric=TRUE)
+  
+  
+  get_ref_depth <- function(ref, AU, CU, GU, TU) {
+    switch(ref,
+           "A" = AU,
+           "C" = CU,
+           "G" = GU,
+           "T" = TU,
+           NA) # Default to NA if no match
+  }
+  
+  # Function to get the alternate depth for normal or tumor samples
+  get_alt_depth <- function(alt, AU, CU, GU, TU) {
+    switch(alt,
+           "A" = AU,
+           "C" = CU,
+           "G" = GU,
+           "T" = TU,
+           NA) # Default to NA if no match
+  }
+  
+  # Create the new columns
+  df_NAlt$DP_Normal <- DP[, "NORMAL"] # Assuming 'Normal' is a column in DP
+  df_NAlt$DP_Tumor <- DP[, "TUMOR"] # Assuming 'Tumour' is a column in DP
+  
+  df_NAlt$FDP_Normal <- FDP[, "NORMAL"]
+  df_NAlt$FDP_Tumor <- FDP[, "TUMOR"]
+  
+  
+  df_NAlt$DP_Ref_Normal <- mapply(get_ref_depth, df_NAlt$Ref, AU[, "NORMAL"], CU[, "NORMAL"], GU[, "NORMAL"], TU[, "NORMAL"])
+  df_NAlt$DP_Ref_Tumor <- mapply(get_ref_depth, df_NAlt$Ref, AU[, "TUMOR"], CU[, "TUMOR"], GU[, "TUMOR"], TU[, "TUMOR"])
+  
+  df_NAlt$DP_Alt_Normal <- mapply(get_alt_depth, df_NAlt$Alt, AU[, "NORMAL"], CU[, "NORMAL"], GU[, "NORMAL"], TU[, "NORMAL"])
+  df_NAlt$DP_Alt_Tumor <- mapply(get_alt_depth, df_NAlt$Alt, AU[, "TUMOR"], CU[, "TUMOR"], GU[, "TUMOR"], TU[, "TUMOR"])
+  
+  df_NAlt <- df_NAlt[grepl("chr", df_NAlt$Chr), ]
+  
+  df_NAlt <- df_NAlt %>%
+    mutate(VAF_Normal = DP_Alt_Normal / (DP_Ref_Normal + DP_Alt_Normal),
+           VAF_Tumor = DP_Alt_Tumor / (DP_Ref_Tumor + DP_Alt_Tumor),
+           diff_VAF = abs(VAF_Normal - VAF_Tumor))
+  
+  return(df_NAlt)
+  
+}
+
+```
+
+## Process Samples
+
+```{r}
+st_c2041_df <- process_strelka(strelka_c2041)
+st_c2040_df <- process_strelka(strelka_c2040)
+
+st_c2040_filtered <- st_c2040_df %>% filter(Filter == "PASS")
+st_c2041_filtered <- st_c2041_df %>% filter(Filter == "PASS")
+```
+
+## Mutation Classification
+
+```{r} 
+classify_mutation <- function(ref, alt) {
+  case_when(
+    ref %in% c("A", "G") & alt %in% c("A", "G") ~ "Transition",
+    ref %in% c("C", "T") & alt %in% c("C", "T") ~ "Transition",
+    ref %in% c("A", "C", "G", "T") & alt %in% c("A", "C", "G", "T") ~ "Transversion",
+    TRUE ~ NA_character_
+  )
+}
+
+st_c2040_filtered <- st_c2040_filtered %>%
+  mutate(MutationType = classify_mutation(Ref, Alt))
+
+st_c2041_filtered <- st_c2041_filtered %>%
+  mutate(MutationType = classify_mutation(Ref, Alt))
+print("WT (C2040)")
+table(st_c2040_filtered$MutationType)
+print("BRCA -/+ (C2041)")
+table(st_c2041_filtered$MutationType)
+```
+
+## Visualization: Mutation Distribution
+
+```{r} 
+
+mutations_per_chr <- function(df) {
+  df %>% group_by(Chr) %>% summarise(Count = n()) %>% arrange(desc(Count))
+}
+
+c2040_chr <- mutations_per_chr(st_c2040_filtered)
+c2041_chr <- mutations_per_chr(st_c2041_filtered)
+
+mutation_data <- bind_rows(
+  c2040_chr %>% mutate(Sample = "C2040"),
+  c2041_chr %>% mutate(Sample = "C2041")
+)
+
+mutation_data <- mutation_data %>%
+  mutate(Chr = factor(Chr, levels = mixedsort(unique(Chr))))  # Sort naturally (chr1, chr2, ..., chrX, chrY)
+
+# Plot with sorted chromosomes
+print(ggplot(mutation_data, aes(x = Chr, y = Count, fill = Sample)) +
+  geom_bar(stat = "identity", position = "dodge", width = 0.7) +  
+  scale_fill_manual(values = c("#0072B2", "#D55E00")) +  
+  theme_classic(base_size = 16) +  
+  labs(
+    title = "Mutation Distribution Across Chromosomes",
+    x = "Chromosome",
+    y = "Mutation Count",
+    fill = "Sample"
+  ) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 18),
+    axis.text.x = element_text(angle = 45, hjust = 1),  
+    legend.position = "top",  
+    legend.title = element_text(size = 14, face = "bold"),
+    legend.text = element_text(size = 12)
+  ) +
+  guides(fill = guide_legend(reverse = TRUE)))
+```
+
+```{r} 
+
+
+# Create unique identifiers for mutations based on Chr and Pos
+st_c2040_filtered <- st_c2040_filtered %>% mutate(MutationID = paste(Chr, Pos, Ref, Alt, sep="_"))
+st_c2041_filtered <- st_c2041_filtered %>% mutate(MutationID = paste(Chr, Pos, Ref, Alt, sep="_"))
+
+# Identify shared and unique mutations
+shared_mutations <- intersect(st_c2040_filtered$MutationID, st_c2041_filtered$MutationID)
+unique_c2040 <- setdiff(st_c2040_filtered$MutationID, st_c2041_filtered$MutationID)
+unique_c2041 <- setdiff(st_c2041_filtered$MutationID, st_c2040_filtered$MutationID)
+
+cat("Shared Mutations:", length(shared_mutations), "\n")
+cat("Unique to C2040:", length(unique_c2040), "\n")
+cat("Unique to C2041:", length(unique_c2041), "\n")
+
+
+```
+
+
+```{r} 
+
+
+# Plot VAF distributions
+ggplot(bind_rows(st_c2040_filtered %>% mutate(Sample="C2040"), 
+                 st_c2041_filtered %>% mutate(Sample="C2041")), 
+       aes(x=VAF_Tumor, fill=Sample)) +
+  geom_density(alpha=0.5) +
+  theme_minimal() +
+  labs(title="VAF Distribution in Tumor Samples", x="VAF", y="Density")
+
+
+```
+
+
+```{r}
+# Function to count mutation signatures (Ref -> Alt)
+count_mutation_signatures <- function(df) {
+  df %>%
+    filter(!is.na(Ref) & !is.na(Alt)) %>%  # Ensure valid values
+    group_by(Ref, Alt) %>%
+    summarise(Count = n(), .groups = "drop") %>%
+    arrange(desc(Count))  # Sort by most common mutations
+}
+
+# Apply to C2040
+mutation_counts_c2040 <- count_mutation_signatures(st_c2040_filtered)
+
+# Apply to C2041
+mutation_counts_c2041 <- count_mutation_signatures(st_c2041_filtered)
+
+# View results
+#print(mutation_counts_c2040)
+#print(mutation_counts_c2041)
+
+mutation_order <- c("C→A", "C→G", "C→T", "T→A", "T→C", "T→G")  # Standard order
+
+# Function to count and classify mutation signatures
+count_mutation_signatures <- function(df) {
+  df %>%
+    filter(!is.na(Ref) & !is.na(Alt)) %>%  # Ensure valid Ref/Alt bases
+    mutate(mutation_type = case_when(
+      Ref == "A" & Alt == "C" ~ "T→G",
+      Ref == "A" & Alt == "G" ~ "T→C",
+      Ref == "A" & Alt == "T" ~ "T→A",
+      Ref == "G" & Alt == "A" ~ "C→T",
+      Ref == "G" & Alt == "C" ~ "C→G",
+      Ref == "G" & Alt == "T" ~ "C→A",
+      TRUE ~ paste0(Ref, "→", Alt)  # Keep existing C/T mutations
+    )) %>%
+    filter(mutation_type %in% mutation_order) %>%
+    group_by(mutation_type) %>%
+    summarise(Count = n(), .groups = "drop") %>%
+    mutate(mutation_type = factor(mutation_type, levels = mutation_order))  # Set fixed order
+}
+
+
+plot_mutation_signatures <- function(df, sample_name) {
+  mutation_counts <- count_mutation_signatures(df)  # Get processed mutation counts
+  
+  ggplot(mutation_counts, aes(x = mutation_type, y = Count, fill = mutation_type)) +
+    geom_bar(stat = "identity", width = 0.7, show.legend = FALSE) +  # Bars for mutation counts
+    geom_text(aes(label = Count), hjust = -0.2, size = 2, fontface = "bold") +  # Add count labels
+    scale_fill_manual(values = c("#D55E00", "#0072B2", "#009E73", "#E69F00", "#56B4E9", "#CC79A7")) +  # Nature-like colors
+    coord_flip() +  # Flip for horizontal readability
+    labs(
+      title = paste("Mutation Signatures in", sample_name),
+      x = "Mutation Type",
+      y = "Mutation Count"
+    ) +
+    theme_classic(base_size = 16) +  # Clean, professional theme
+    theme(
+      plot.title = element_text(hjust = 0.5, face = "bold", size = 18),
+      axis.text.x = element_text(size = 14),
+      axis.text.y = element_text(size = 14),
+      axis.title.x = element_text(face = "bold", size = 16),
+      axis.title.y = element_text(face = "bold", size = 16)
+    )
+}
+
+# Apply function to each sample dataset
+plot_c2040 <- plot_mutation_signatures(st_c2040_filtered, "C2040")
+plot_c2041 <- plot_mutation_signatures(st_c2041_filtered, "C2041")
+
+# Display the plots
+print(plot_c2040)
+print(plot_c2041)
+```
+```{r}
+
+get_flanking_nucleotides <- function(chr, pos) {
+  left_nuc <- as.character(BSgenome.Hsapiens.UCSC.hg38[[chr]][pos - 1])
+  right_nuc <- as.character(BSgenome.Hsapiens.UCSC.hg38[[chr]][pos + 1])
+  return(c(left_nuc, right_nuc))
+}
+
+# Add the columns to your dataset
+st_c2040_filtered <- st_c2040_filtered %>%
+  rowwise() %>%
+  mutate(
+    nucs = list(get_flanking_nucleotides(Chr, Pos)),  # Store result as a list
+    left_nucleotide = nucs[[1]],                      # Extract first element
+    right_nucleotide = nucs[[2]]                      # Extract second element
+  ) %>%
+  select(-nucs) %>%                                   # Remove temporary column
+  ungroup()
+
+
+
+st_c2041_filtered <- st_c2041_filtered %>%
+  rowwise() %>%
+  mutate(
+    nucs = list(get_flanking_nucleotides(Chr, Pos)),  # Store result as a list
+    left_nucleotide = nucs[[1]],                      # Extract first element
+    right_nucleotide = nucs[[2]]                      # Extract second element
+  ) %>%
+  select(-nucs) %>%                                   # Remove temporary column
+  ungroup()
+
+
+st_c2040_filtered <- st_c2040_filtered %>%
+  mutate(trinucleotide_context = paste0(left_nucleotide, "-", right_nucleotide))
+
+st_c2041_filtered <- st_c2041_filtered %>%
+  mutate(trinucleotide_context = paste0(left_nucleotide, "-", right_nucleotide))
+
+unique(st_c2041_filtered$trinucleotide_context)
+
+
+```
+
+```{r}
+
+plot_mutation_signatures <- function(data, dataset_name) {
+  # Ensure required columns
+  if (!all(c("Ref", "Alt", "trinucleotide_context") %in% names(data))) {
+    stop("Data must contain columns: Ref, Alt, trinucleotide_context")
+  }
+  
+  # Convert mutations to the six canonical types
+  data <- data %>%
+    mutate(mutation_type = case_when(
+      Ref == "A" & Alt == "C" ~ "T>C",
+      Ref == "A" & Alt == "G" ~ "T>G",
+      Ref == "A" & Alt == "T" ~ "T>A",
+      Ref == "G" & Alt == "A" ~ "C>T",
+      Ref == "G" & Alt == "C" ~ "C>G",
+      Ref == "G" & Alt == "T" ~ "C>A",
+      TRUE ~ paste0(Ref, ">", Alt)  # Keep C/T mutations unchanged
+    )) %>%
+    filter(mutation_type %in% c("C>A", "C>G", "C>T", "T>A", "T>C", "T>G"))  # Keep only valid types
+  
+  # Count mutations
+  mutation_counts <- data %>%
+    count(mutation_type, trinucleotide_context, name = "count")
+  
+  # Set custom COSMIC colors
+  cosmic_colors <- c("C>A" = "#0099CC",  # Blue
+                     "C>G" = "#000000",  # Black
+                     "C>T" = "#CC0000",  # Red
+                     "T>A" = "#999999",  # Gray
+                     "T>C" = "#66CC66",  # Green
+                     "T>G" = "#FF9999")  # Pink
+  
+  # Get total mutations for annotation
+  total_mutations <- sum(mutation_counts$count)
+  
+  # Plot
+  p <- ggplot(mutation_counts, aes(x = trinucleotide_context, y = count, fill = mutation_type)) +
+    geom_col(width = 0.7) +
+    scale_fill_manual(values = cosmic_colors) +
+    facet_grid(. ~ mutation_type, scales = "free_x", space = "free_x") +  # Align bars for each mutation type
+    theme_minimal(base_size = 14) +
+    theme(
+      axis.text.x = element_blank(),  # Remove x-axis labels
+      axis.ticks.x = element_blank(),  # Remove x-axis ticks
+      axis.text.y = element_text(size = 12),
+      strip.text = element_text(face = "bold", size = 14, color = "white", margin = margin(t = 5, b = 5)),  # Mutation type as x-axis title
+      strip.background = element_rect(fill = "black"),  # Background for mutation labels
+      panel.grid.major.x = element_blank(),
+      panel.grid.minor = element_blank(),
+      legend.position = "none",
+      axis.title.x = element_blank()  # Removes x-axis label
+    ) +
+    labs(
+      title = paste0(dataset_name, " (", total_mutations, " SNVs)"),
+      y = "Mutation Count"  # Keep only the y-axis label
+    )
+  
+  # Print plot
+  print(p)
+}
+
+# Generate separate plots for each dataset
+plot_mutation_signatures(st_c2040_filtered, "C2040")
+plot_mutation_signatures(st_c2041_filtered, "C2041")
+
+```
+
+```{r}
+
+# Combine both datasets with a "sample" identifier
+combined_data <- bind_rows(
+  st_c2040_filtered %>% mutate(sample = "BRCA +/+ (WT)"),
+  st_c2041_filtered %>% mutate(sample = "BRCA -/+ (Het)")
+)
+
+# Create Ref → Alt mutation type column
+combined_data <- combined_data %>%
+  mutate(mutation_type = paste0(Ref, "→", Alt))
+
+# should be this since DNA is double strand
+combined_data <- combined_data %>%
+  mutate(mutation_type = case_when(
+    Ref == "A" & Alt == "C" ~ "T→G",
+    Ref == "A" & Alt == "G" ~ "T→C",
+    Ref == "A" & Alt == "T" ~ "T→A",
+    Ref == "G" & Alt == "A" ~ "C→T",
+    Ref == "G" & Alt == "C" ~ "C→G",
+    Ref == "G" & Alt == "T" ~ "C→A",
+    TRUE ~ paste0(Ref, "→", Alt)  # Keep C/T mutations unchanged
+  )) %>%
+  filter(mutation_type %in% c("C→A", "C→G", "C→T", "T→A", "T→C", "T→G"))  # Keep only valid types
+
+
+# Count occurrences for each sample
+mutation_counts <- combined_data %>%
+  count(sample, mutation_type, trinucleotide_context, name = "count") %>%
+  pivot_wider(names_from = sample, values_from = count, values_fill = 0) %>%
+  mutate(ratio = (`BRCA +/+ (WT)` + 1) / (`BRCA -/+ (Het)` + 1))  # Avoid division by zero
+
+mutation_counts <- mutation_counts %>%
+  mutate(ratio = ifelse(ratio == 0, 1e-3, ratio))  # Replace zeros with small nonzero values
+
+# Define custom COSMIC colors
+cosmic_colors <- c("C→A" = "#0099CC",  # Blue
+                   "C→G" = "#000000",  # Black
+                   "C→T" = "#CC0000",  # Red
+                   "T→A" = "#999999",  # Gray
+                   "T→C" = "#66CC66",  # Green
+                   "T→G" = "#FF9999")  # Pink
+
+# Define colors for BRCA conditions
+palette_colors <- c("BRCA +/+ (WT)" = "#377eb8",  # Blue
+                    "BRCA -/+ (Het)" = "#e41a1c") # Red
+
+# Main bar plot with transparency
+p1 <- ggplot(mutation_counts, aes(x = trinucleotide_context)) +
+  geom_col(aes(y = `BRCA +/+ (WT)`, fill = "BRCA +/+ (WT)"), alpha = 0.5, width = 0.7) +
+  geom_col(aes(y = `BRCA -/+ (Het)`, fill = "BRCA -/+ (Het)"), alpha = 0.5, width = 0.7) +
+  facet_grid(. ~ mutation_type, scales = "free_x", space = "free_x") +  # Align by mutation type
+  theme_minimal(base_size = 14) +
+  theme(
+    axis.text.x = element_blank(),  # Remove x-axis labels
+    axis.ticks.x = element_blank(),  # Remove x-axis ticks
+    axis.text.y = element_text(size = 12),
+    strip.text = element_text(face = "bold", size = 14, color = "white", margin = margin(t = 5, b = 5)),  # Mutation type as x-axis title
+    strip.background = element_rect(fill = "black"),  # Background for mutation labels
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank(),
+    legend.position = "right",  # Keep legend for WT and Het comparison
+    axis.title.x = element_blank()  # Removes x-axis label
+  ) +
+  labs(
+    title = "Mutation Signature Comparison: BRCA +/+ (WT) vs. BRCA -/+ (Het)",
+    y = "Total Count"  # Keep only y-axis label
+  ) +
+  scale_fill_manual(values = palette_colors)
+
+# Print the plot
+print(p1)
+
+
+
+# Define COSMIC colors, ensuring they match exactly with `mutation_type` in the dataset
+cosmic_colors <- c("C→A" = "#0099CC",  # Blue
+                   "C→G" = "#000000",  # Black
+                   "C→T" = "#CC0000",  # Red
+                   "T→A" = "#999999",  # Gray
+                   "T→C" = "#66CC66",  # Green
+                   "T→G" = "#FF9999")  # Pink
+
+# Ensure `mutation_type` is a factor with the correct levels
+mutation_counts <- mutation_counts %>%
+  mutate(mutation_type = factor(mutation_type, levels = names(cosmic_colors)))  # Match factor levels
+
+# Updated plot
+p2 <- ggplot(mutation_counts, aes(x = trinucleotide_context, y = ratio, group = mutation_type, color = mutation_type)) +
+  geom_line(size = 1.2) +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "black") +  # Reference line
+  geom_hline(yintercept = 2, linetype = "dotted", color = "gray50") +  # Upper threshold
+  geom_hline(yintercept = 0.5, linetype = "dotted", color = "gray50") +  # Lower threshold
+  facet_grid(. ~ mutation_type, scales = "free_x", space = "free_x") +  # Align by mutation type
+  scale_y_log10() +  # Log scale for better visibility
+  theme_minimal(base_size = 14) +
+  theme(
+    axis.text.x = element_blank(),  # Remove x-axis labels
+    axis.ticks.x = element_blank(),  # Remove x-axis ticks
+    axis.text.y = element_text(size = 12),
+    strip.text = element_text(face = "bold", size = 14, color = "white", margin = margin(t = 5, b = 5)),  # Mutation type as x-axis title
+    strip.background = element_rect(fill = "black"),  # Background for mutation labels
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank(),
+    legend.position = "none",
+    axis.title.x = element_blank()  # Removes x-axis label
+  ) +
+  labs(
+    title = "WT / Het Mutation Fold-Change",
+    y = "WT / Het Ratio (Log Scale)"  # Keep only y-axis label
+  ) +
+  scale_color_manual(values = cosmic_colors)  # Assign correct colors
+
+# Print the plot
+print(p2)
+
+
+final_plot <- p1 + p2 + plot_layout(ncol = 1, heights = c(1, 3))  # Give p1 more space
+
+final_plot
+```
+

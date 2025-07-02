@@ -1,0 +1,502 @@
+---
+title: "CoverageAnalysis"
+date: "2025-02-01"
+---
+
+```{r library}
+imports=c("dplyr", "ggplot2", "tidyr", "tidyverse", "karyoploteR", "GenomicRanges")
+for (import in imports) {
+  library(import, character.only = TRUE)
+}
+```
+
+
+```{r Data opening (not filtered)}
+
+cbe7_neg <- read.table(file="/Users/pedrosilvestre/Desktop/NFS_Pedro/BRCA_project/samples/CBE7negB/stats/CBE7negB_3005012_mosdepth1kb/CBE7negB.regions.bed.gz",
+                       sep = "\t", header = FALSE, col.names = c("chr", "init_pos", "end_pos", "cov"))
+
+c2040_neg = read.table(file="/Users/pedrosilvestre/Desktop/NFS_Pedro/BRCA_project/samples/C2040neg/stats/C2040neg_3005014_mosdepth1kb/C2040neg.regions.bed.gz",
+                      sep = "\t", header = FALSE, col.names = c("chr", "init_pos", "end_pos", "cov"))
+
+c2041_neg = read.table(file="/Users/pedrosilvestre/Desktop/NFS_Pedro/BRCA_project/samples/C2041neg/stats/C2041neg_3005416_mosdepth1kb/C2041neg.regions.bed.gz",
+                      sep = "\t", header = FALSE, col.names = c("chr", "init_pos", "end_pos", "cov"))
+
+cbe7_ttd = read.table(file="/Users/pedrosilvestre/Desktop/NFS_Pedro/BRCA_project/samples/CBE7ttdB/stats/CBE7ttdB_3005013_mosdepth1kb/CBE7ttdB.regions.bed.gz",
+                     sep = "\t", header = FALSE, col.names = c("chr", "init_pos", "end_pos", "cov"))
+
+c2040_ttd = read.table(file="/Users/pedrosilvestre/Desktop/NFS_Pedro/BRCA_project/samples/C2040ttd/stats/C2040ttd_3005015_mosdepth1kb/C2040ttd.regions.bed.gz",
+                      sep = "\t", header = FALSE, col.names = c("chr", "init_pos", "end_pos", "cov"))
+
+c2041_ttd = read.table(file="/Users/pedrosilvestre/Desktop/NFS_Pedro/BRCA_project/samples/C2041ttd/stats/C2041ttd_3005415_mosdepth1kb/C2041ttd.regions.bed.gz",
+                     sep = "\t", header = FALSE, col.names = c("chr", "init_pos", "end_pos", "cov"))
+
+```
+
+```{r Data opening (filtered)}
+
+cbe7_neg_filt = read.table(file="/Users/pedrosilvestre/Desktop/NFS_Pedro/BRCA_project/samples/CBE7negB/stats/CBE7negB_3005003_mosdepth1kb/CBE7negB.regions.bed.gz",
+                      sep = "\t", header = FALSE, col.names = c("chr", "init_pos", "end_pos", "cov"))
+
+c2040_neg_filt = read.table(file="/Users/pedrosilvestre/Desktop/NFS_Pedro/BRCA_project/samples/C2040neg/stats/C2040neg_3005023_mosdepth1kb/C2040neg.regions.bed.gz",
+                    sep = "\t", header = FALSE, col.names = c("chr", "init_pos", "end_pos", "cov"))
+
+c2041_neg_filt = read.table(file="/Users/pedrosilvestre/Desktop/NFS_Pedro/BRCA_project/samples/C2041neg/stats/C2041neg_3005025_mosdepth1kb/C2041neg.regions.bed.gz",
+                    sep = "\t", header = FALSE, col.names = c("chr", "init_pos", "end_pos", "cov"))
+
+cbe7_ttd_filt = read.table(file="/Users/pedrosilvestre/Desktop/NFS_Pedro/BRCA_project/samples/CBE7ttdB/stats/CBE7ttdB_3005002_mosdepth1kb/CBE7ttdB.regions.bed.gz",
+                     sep = "\t", header = FALSE, col.names = c("chr", "init_pos", "end_pos", "cov"))
+
+c2041_ttd_filt = read.table(file="/Users/pedrosilvestre/Desktop/NFS_Pedro/BRCA_project/samples/C2041ttd/stats/C2041ttd_3005022_mosdepth1kb/C2041ttd.regions.bed.gz",
+                    sep = "\t", header = FALSE, col.names = c("chr", "init_pos", "end_pos", "cov"))
+
+c2040_ttd_filt = read.table(file="/Users/pedrosilvestre/Desktop/NFS_Pedro/BRCA_project/samples/C2040ttd/stats/C2040ttd_3005024_mosdepth1kb/C2040ttd.regions.bed.gz",
+                    sep = "\t", header = FALSE, col.names = c("chr", "init_pos", "end_pos", "cov"))
+
+
+```
+
+```{r auxiliar functions}
+
+# function to have 1Mb window instead of 1Kb
+process_regions <- function(data) {
+  data_1mb <- data %>%
+    mutate(bin = (init_pos %/% 1e6) * 1e6) %>%
+    group_by(chr, bin) %>%
+    summarize(init_pos = min(init_pos), end_pos = max(end_pos), cov = mean(cov, na.rm = TRUE)) %>%
+    ungroup()
+  
+  GRanges(
+    seqnames = data_1mb$chr,
+    ranges = IRanges(start = data_1mb$init_pos, end = data_1mb$end_pos),
+    coverage = log10(data_1mb$cov + 1)
+  )
+}
+
+# dif between two datasets
+compare_coverage <- function(region1, region2, label1, label2) {
+  overlaps <- findOverlaps(region1, region2)
+  
+  # Get matched regions
+  matched_region1 <- region1[queryHits(overlaps)]
+  matched_region2 <- region2[subjectHits(overlaps)]
+  
+  # Compute coverage difference
+  coverage_diff <- matched_region1$coverage - matched_region2$coverage
+  
+  # Create a new GRanges object with the differences
+  GRanges(
+    seqnames = seqnames(matched_region1),
+    ranges = ranges(matched_region1),
+    coverage_diff = coverage_diff,
+    comparison = paste(label1, "vs", label2)
+  )
+}
+
+
+```
+
+## Control C2040 (WT) vs C2041 (BRCA -/+) vs CBE7 (BRCA -/-)
+
+
+### Coverage across chromosomes
+
+Should convert data to mean coverare 1e6 bp 
+```{r coverage multiple chr}
+
+# Apply function to each dataset
+cbe7_regions <- process_regions(cbe7_neg)
+c2040_regions <- process_regions(c2040_neg)
+c2041_regions <- process_regions(c2041_neg)
+c2040_regions_filt <- process_regions(c2040_neg_filt)
+c2041_regions_filt <- process_regions(c2041_neg_filt)
+cbe7_regions_filt <- process_regions(cbe7_neg_filt)
+
+```
+### plot the coverage across chromossomes for the different control samples:
+
+```{r Plot}
+
+
+kp <- plotKaryotype(genome="hg38", plot.type=1, cex =.5) %>% kpAddBaseNumbers(cex=.3)
+
+# Add first dataset (CBE7negB) in blue
+kpBars(kp, data=c2040_regions, y1=c2040_regions$coverage, ymax=max_cov, col="slateblue", border=NA)
+kpAddMainTitle(kp, "WT", cex=0.5)
+
+kp <- plotKaryotype(genome="hg38", plot.type=1, cex =.5) %>% kpAddBaseNumbers(cex=.3)
+
+
+# Add first dataset (CBE7negB) in blue
+kpBars(kp, data=c2041_regions, y1=c2041_regions$coverage, ymax=max_cov, col="slateblue", border=NA)
+#kpPlotDensity(kp, data=c2041_regions, window.size = 1e7) #, y = c2041_regions$coverage, ymax=max_cov, col="slateblue", border="slateblue", window.size = 1e6)
+kpAddMainTitle(kp, "BRCA -/+", cex=0.5)
+
+
+kp <- plotKaryotype(genome="hg38", plot.type=1, cex =.5) %>% kpAddBaseNumbers(cex=.3)
+# Add first dataset (CBE7negB) in blue
+kpBars(kp, data=cbe7_regions, y1=cbe7_regions$coverage, ymax=max_cov, col="slateblue", border=NA)
+#kpAxis(kp, ymax=kp$latest.plot$computed.values$max.density)
+kpAddMainTitle(kp, "BRCA -/-", cex=0.5)
+```
+Closer to the centromeres, there is peaks in coverage for the CBE7
+
+```{r}
+
+#to_zoom <- GRanges('chrY', IRanges(start=0, end=60e6))
+#c2041_regions
+
+kp <- plotKaryotype(cex=.7, chr = "chrY") %>%  #zoom = to_zoom
+  kpAddBaseNumbers(cex=.5) %>% 
+  kpAxis(cex=.5, ymin=0) %>%
+  kpBars(data=c2040_regions, y1 = c2040_regions$coverage, ymax=max_cov)
+
+kpAddMainTitle(kp, "WT", cex=0.5)
+
+kp <- plotKaryotype(cex=.7, chr = "chrY") %>%  #zoom = to_zoom
+  kpAddBaseNumbers(cex=.5) %>% 
+  kpAxis(cex=.5, ymin=0) %>%
+  kpBars(data=c2041_regions, y1 = c2041_regions$coverage, ymax=max_cov)
+
+kpAddMainTitle(kp, "BRCA +/-", cex=0.5)
+
+kp <- plotKaryotype(cex=.7, chr = "chrY") %>%  #zoom = to_zoom
+  kpAddBaseNumbers(cex=.5) %>% 
+  kpAxis(cex=.5, ymin=0) %>%
+  kpBars(data=cbe7_regions, y1 = cbe7_regions$coverage, ymax=max_cov)
+
+kpAddMainTitle(kp, "BRCA -/-", cex=0.5)
+
+
+
+# Create karyotype plot
+kp <- plotKaryotype(chromosomes = "chrY", plot.type = 1)
+
+# Define colors for legend
+sample_colors <- c("#8844FF", "#AA66FF", "#CC88FF")
+sample_labels <- c("BRCA -/-", "WT", "BRCA +/-")
+
+# Plot the coverage data
+kpBars(kp, data = cbe7_regions, data.panel = 1, y1 = cbe7_regions$coverage, ymax = max_cov, col = sample_colors[1], window.size = 1e6, r0 = 0, r1 = 0.25)
+kpBars(kp, data = c2040_regions, data.panel = 1, y1 = c2040_regions$coverage, ymax = max_cov, col = sample_colors[2], window.size = 1e6, r0 = 0.5, r1 = 0.75)
+kpBars(kp, data = c2041_regions, data.panel = 1, y1 = c2041_regions$coverage, ymax = max_cov, col = sample_colors[3], window.size = 1e6, r0 = 1, r1 = 1.25)
+
+# Add y-axis for each plot
+kpAxis(kp, ymin = 0, ymax = max_cov, r0 = 0, r1 = 0.25, cex.axis = 0.4)  # Left Y-axis for first panel
+kpAxis(kp, ymin = 0, ymax = max_cov, r0 = 0.5, r1 = 0.75, cex.axis = 0.4) # Left Y-axis for second panel
+kpAxis(kp, ymin = 0, ymax = max_cov, r0 = 1, r1 = 1.25, cex.axis = 0.4) # Left Y-axis for third panel
+
+# Add a legend box
+legend("topright", legend = sample_labels, fill = sample_colors, border = "black", 
+       title = "Samples", bty = "n", cex = 0.8, inset = c(0, -0.10), ncol = 3)  # Adjust position if needed
+
+
+#without pseidoautosomal regions
+
+
+par1 <- toGRanges(data.frame("chrY", 10000, 2781479))      # PAR1
+par2 <- toGRanges(data.frame("chrY", 56887902, 57217415))  # PAR2
+
+
+
+# Create karyotype plot
+kp <- plotKaryotype(chromosomes = "chrY", plot.type = 1)
+
+# Define colors for legend
+sample_colors <- c("#8844FF", "#AA66FF", "#CC88FF")
+sample_labels <- c("BRCA -/-", "WT", "BRCA +/-")
+
+# Plot the coverage data
+kpBars(kp, data = cbe7_regions, data.panel = 1, y1 = cbe7_regions$coverage, ymax = max_cov, col = sample_colors[1], window.size = 1e6, r0 = 0, r1 = 0.25)
+kpBars(kp, data = c2040_regions, data.panel = 1, y1 = c2040_regions$coverage, ymax = max_cov, col = sample_colors[2], window.size = 1e6, r0 = 0.5, r1 = 0.75)
+kpBars(kp, data = c2041_regions, data.panel = 1, y1 = c2041_regions$coverage, ymax = max_cov, col = sample_colors[3], window.size = 1e6, r0 = 1, r1 = 1.25)
+
+# Add y-axis for each plot
+kpAxis(kp, ymin = 0, ymax = max_cov, r0 = 0, r1 = 0.25, cex.axis = 0.4)  # Left Y-axis for first panel
+kpAxis(kp, ymin = 0, ymax = max_cov, r0 = 0.5, r1 = 0.75, cex.axis = 0.4) # Left Y-axis for second panel
+kpAxis(kp, ymin = 0, ymax = max_cov, r0 = 1, r1 = 1.25, cex.axis = 0.4) # Left Y-axis for third panel
+
+kpRect(kp, data = par1, col = "red", border = "black", y0 = 0, y1 = 1, data.panel = 1)
+kpRect(kp, data = par2, col = "red", border = "black", y0 = 0, y1 = 1, data.panel = 1)
+
+
+
+# Add a legend box
+legend("topright", legend = sample_labels, fill = sample_colors, border = "black", 
+       title = "Samples", bty = "n", cex = 0.8, inset = c(0, -0.10), ncol = 3)  # Adjust position if needed
+
+
+```
+
+
+
+```{r}
+
+chr_plot = "chr19"
+
+
+kp <- plotKaryotype(chromosomes = chr_plot, plot.type = 1)
+
+# Define colors for legend
+sample_colors <- c("#8844FF", "#AA66FF", "#CC88FF")
+sample_labels <- c("BRCA -/-", "WT", "BRCA +/-")
+
+# Plot the coverage data
+kpBars(kp, data = cbe7_regions, data.panel = 1, y1 = cbe7_regions$coverage, ymax = max_cov, col = sample_colors[1], window.size = 1e6, r0 = 0, r1 = 0.25)
+kpBars(kp, data = c2040_regions, data.panel = 1, y1 = c2040_regions$coverage, ymax = max_cov, col = sample_colors[2], window.size = 1e6, r0 = 0.5, r1 = 0.75)
+kpBars(kp, data = c2041_regions, data.panel = 1, y1 = c2041_regions$coverage, ymax = max_cov, col = sample_colors[3], window.size = 1e6, r0 = 1, r1 = 1.25)
+
+# Add y-axis for each plot
+kpAxis(kp, ymin = 0, ymax = max_cov, r0 = 0, r1 = 0.25, cex.axis = 0.4)  # Left Y-axis for first panel
+kpAxis(kp, ymin = 0, ymax = max_cov, r0 = 0.5, r1 = 0.75, cex.axis = 0.4) # Left Y-axis for second panel
+kpAxis(kp, ymin = 0, ymax = max_cov, r0 = 1, r1 = 1.25, cex.axis = 0.4) # Left Y-axis for third panel
+
+print(max(cbe7_neg[cbe7_neg$chr == "chr19", ]$cov))
+print(max(c2040_neg[c2040_neg$chr == "chr19", ]$cov))
+print(max(c2041_neg[c2041_neg$chr == "chr19", ]$cov))
+
+
+
+```
+
+
+```{r compare coverage between samples}
+
+#update this part
+
+# Perform comparisons
+cbe7_vs_c2040 <- compare_coverage(cbe7_regions, c2040_regions, "CBE7", "C2040")
+cbe7_vs_c2041 <- compare_coverage(cbe7_regions, c2041_regions, "CBE7", "C2041")
+c2040_vs_c2041 <- compare_coverage(c2040_regions, c2041_regions, "C2040", "C2041")
+
+# Print summary
+cbe7_vs_c2040
+cbe7_vs_c2041
+c2040_vs_c2041
+
+kp <- plotKaryotype(genome="hg38", plot.type=1)
+
+# Color based on positive/negative difference
+colors <- ifelse(cbe7_vs_c2040$coverage_diff > 0, "blue", "red")
+
+# Plot bars with color-coding
+kpBars(kp, data=cbe7_vs_c2040, y1=cbe7_vs_c2040$coverage_diff, ymax=max_cov, col=colors, border=NA)
+
+# Add Title
+kpAddMainTitle(kp, "Positive (blue): CBE7 > C2040, Negative (red): C2040 > CBE7", cex=0.7)
+
+
+kp <- plotKaryotype(genome="hg38", plot.type=1)
+
+# Color based on positive/negative difference
+colors <- ifelse(cbe7_vs_c2041$coverage_diff > 0, "blue", "red")
+
+# Plot bars with color-coding
+kpBars(kp, data=cbe7_vs_c2041, y1=cbe7_vs_c2041$coverage_diff, ymax=max_cov, col=colors, border=NA)
+
+# Add Title
+kpAddMainTitle(kp, "Positive (blue): CBE7 > C2041, Negative (red): C2041 > CBE7", cex=0.7)
+
+
+
+kp <- plotKaryotype(genome="hg38", plot.type=1)
+
+colors <- ifelse(c2040_vs_c2041$coverage_diff > 0, "blue", "red")
+
+# Plot bars with color-coding
+kpBars(kp, data=c2040_vs_c2041, y1=c2040_vs_c2041$coverage_diff, ymax=max_cov, col=colors, border=NA)
+
+# Add Title
+kpAddMainTitle(kp, "Positive (blue): C2040 > C2041, Negative (red): C2041 > C2040", cex=0.7)
+
+
+```
+## Compare with C2040, C2041, CBE7 control but filtered.
+
+
+
+
+```{r}
+
+
+kp <- plotKaryotype(genome="hg38", plot.type=1, cex =.5) %>% kpAddBaseNumbers(cex=.3)
+
+# Add first dataset (CBE7negB) in blue
+kpBars(kp, data=c2040_regions_filt, y1=c2040_regions_filt$coverage, ymax=max_cov, col="slateblue", border=NA)
+kpAddMainTitle(kp, "WT (filtered)", cex=0.5)
+
+
+kp <- plotKaryotype(cex=.7, chr = "chrY") %>%  #zoom = to_zoom
+  kpAddBaseNumbers(cex=.5) %>% 
+  kpAxis(cex=.5, ymin=0) %>%
+  kpBars(data=c2040_regions_filt, y1 = c2040_regions_filt$coverage, ymax=max_cov)
+
+kpAddMainTitle(kp, "WT (filtered)", cex=0.5)
+
+
+
+kp <- plotKaryotype(genome="hg38", plot.type=1, cex =.5) %>% kpAddBaseNumbers(cex=.3)
+
+# Add first dataset (CBE7negB) in blue
+kpBars(kp, data=c2041_regions_filt, y1=c2041_regions_filt$coverage, ymax=max_cov, col="slateblue", border=NA)
+kpAddMainTitle(kp, "BRCA -/+ (filtered)", cex=0.5)
+
+
+kp <- plotKaryotype(cex=.7, chr = "chrY") %>%  #zoom = to_zoom
+  kpAddBaseNumbers(cex=.5) %>% 
+  kpAxis(cex=.5, ymin=0) %>%
+  kpBars(data=c2041_regions_filt, y1 = c2041_regions_filt$coverage, ymax=max_cov)
+
+kpAddMainTitle(kp, "BRCA -/+ (filtered)", cex=0.5)
+
+
+
+kp <- plotKaryotype(genome="hg38", plot.type=1, cex =.5) %>% kpAddBaseNumbers(cex=.3)
+
+# Add first dataset (CBE7negB) in blue
+kpBars(kp, data=cbe7_regions_filt, y1=cbe7_regions_filt$coverage, ymax=max_cov, col="slateblue", border=NA)
+kpAddMainTitle(kp, "BRCA -/- (filtered)", cex=0.5)
+
+
+kp <- plotKaryotype(cex=.7, chr = "chrY") %>%  #zoom = to_zoom
+  kpAddBaseNumbers(cex=.5) %>% 
+  kpAxis(cex=.5, ymin=0) %>%
+  kpBars(data=cbe7_regions_filt, y1 = cbe7_regions_filt$coverage, ymax=max_cov)
+
+kpAddMainTitle(kp, "BRCA -/- (filtered)", cex=0.5)
+
+
+
+print("mean coverage chrY WT")
+mean(c2040_neg[c2040_neg$chr == "chrY", ]$cov)
+print("mean coverage chrY WT filtered")
+mean(c2040_neg_filt[c2040_neg_filt$chr == "chrY", ]$cov)
+
+print("mean coverage chrY BRCA -/+")
+mean(c2041_neg[c2041_neg$chr == "chrY", ]$cov)
+print("mean coverage chrY BRCA -/+ filtered")
+mean(c2041_neg_filt[c2041_neg_filt$chr == "chrY", ]$cov)
+
+
+print("mean coverage for BRCA -/-")
+print(mean(cbe7_neg_filt$cov))
+
+print("mean coverage chrY BRCA -/-")
+mean(cbe7_neg[cbe7_neg$chr == "chrY", ]$cov)
+print("mean coverage chrY BRCA -/- filtered")
+mean(cbe7_neg_filt[cbe7_neg_filt$chr == "chrY", ]$cov)
+
+```
+
+## C2040 vs C2041 vs CBE7 Treated unfiltered
+
+```{r}
+
+c2040ttd_regions <- process_regions(c2040_ttd)
+c2041ttd_regions <- process_regions(c2041_ttd)
+cbe7ttd_regions <- process_regions(cbe7_ttd)
+c2040ttd_regions_filt <- process_regions(c2040_ttd_filt)
+c2041ttd_regions_filt <- process_regions(c2041_ttd_filt)
+cbe7ttd_regions_filt <- process_regions(cbe7_ttd_filt)
+
+```
+
+
+```{r}
+
+kp <- plotKaryotype(genome="hg38", plot.type=1, cex =.5) %>% kpAddBaseNumbers(cex=.3)
+
+# Add first dataset (CBE7negB) in blue
+kpBars(kp, data=c2040ttd_regions, y1=c2040ttd_regions$coverage, ymax=max_cov, col="slateblue", border=NA)
+kpAddMainTitle(kp, "WT", cex=0.5)
+
+kp <- plotKaryotype(genome="hg38", plot.type=1, cex =.5) %>% kpAddBaseNumbers(cex=.3)
+
+
+# Add first dataset (CBE7negB) in blue
+kpBars(kp, data=c2041ttd_regions, y1=c2041ttd_regions$coverage, ymax=max_cov, col="slateblue", border=NA)
+#kpPlotDensity(kp, data=c2041_regions, window.size = 1e7) #, y = c2041_regions$coverage, ymax=max_cov, col="slateblue", border="slateblue", window.size = 1e6)
+kpAddMainTitle(kp, "BRCA -/+", cex=0.5)
+
+
+kp <- plotKaryotype(genome="hg38", plot.type=1, cex =.5) %>% kpAddBaseNumbers(cex=.3)
+# Add first dataset (CBE7negB) in blue
+kpBars(kp, data=cbe7ttd_regions, y1=cbe7ttd_regions$coverage, ymax=max_cov, col="slateblue", border=NA)
+#kpAxis(kp, ymax=kp$latest.plot$computed.values$max.density)
+kpAddMainTitle(kp, "BRCA -/-", cex=0.5)
+
+```
+
+## Now filtereded for treated
+
+
+```{r}
+kp <- plotKaryotype(genome="hg38", plot.type=1, cex =.5) %>% kpAddBaseNumbers(cex=.3)
+
+# Add first dataset (CBE7negB) in blue
+kpBars(kp, data=c2040ttd_regions_filt, y1=c2040ttd_regions_filt$coverage, ymax=max_cov, col="slateblue", border=NA)
+kpAddMainTitle(kp, "WT (filtered)", cex=0.5)
+
+
+kp <- plotKaryotype(cex=.7, chr = "chrY") %>%  #zoom = to_zoom
+  kpAddBaseNumbers(cex=.5) %>% 
+  kpAxis(cex=.5, ymin=0) %>%
+  kpBars(data=c2040ttd_regions_filt, y1 = c2040ttd_regions_filt$coverage, ymax=max_cov)
+
+kpAddMainTitle(kp, "WT (filtered)", cex=0.5)
+
+
+
+kp <- plotKaryotype(genome="hg38", plot.type=1, cex =.5) %>% kpAddBaseNumbers(cex=.3)
+
+# Add first dataset (CBE7negB) in blue
+kpBars(kp, data=c2041ttd_regions_filt, y1=c2041ttd_regions_filt$coverage, ymax=max_cov, col="slateblue", border=NA)
+kpAddMainTitle(kp, "BRCA -/+ (filtered)", cex=0.5)
+
+
+kp <- plotKaryotype(cex=.7, chr = "chrY") %>%  #zoom = to_zoom
+  kpAddBaseNumbers(cex=.5) %>% 
+  kpAxis(cex=.5, ymin=0) %>%
+  kpBars(data=c2041ttd_regions_filt, y1 = c2041ttd_regions_filt$coverage, ymax=max_cov)
+
+kpAddMainTitle(kp, "BRCA -/+ (filtered)", cex=0.5)
+
+
+
+kp <- plotKaryotype(genome="hg38", plot.type=1, cex =.5) %>% kpAddBaseNumbers(cex=.3)
+
+# Add first dataset (CBE7negB) in blue
+kpBars(kp, data=cbe7ttd_regions_filt, y1=cbe7ttd_regions_filt$coverage, ymax=max_cov, col="slateblue", border=NA)
+kpAddMainTitle(kp, "BRCA -/- (filtered)", cex=0.5)
+
+
+kp <- plotKaryotype(cex=.7, chr = "chrY") %>%  #zoom = to_zoom
+  kpAddBaseNumbers(cex=.5) %>% 
+  kpAxis(cex=.5, ymin=0) %>%
+  kpBars(data=cbe7ttd_regions_filt, y1 = cbe7ttd_regions_filt$coverage, ymax=max_cov)
+
+kpAddMainTitle(kp, "BRCA -/- (filtered)", cex=0.5)
+
+
+
+print("mean coverage chrY WT")
+mean(c2040_ttd[c2040_ttd$chr == "chrY", ]$cov)
+print("mean coverage chrY WT filtered")
+mean(c2040_ttd_filt[c2040_ttd_filt$chr == "chrY", ]$cov)
+
+print("mean coverage chrY BRCA -/+")
+mean(c2041_ttd[c2041_ttd$chr == "chrY", ]$cov)
+print("mean coverage chrY BRCA -/+ filtered")
+mean(c2041_ttd_filt[c2041_ttd_filt$chr == "chrY", ]$cov)
+
+
+print("mean coverage for BRCA -/-")
+print(mean(cbe7_ttd_filt$cov))
+
+print("mean coverage chrY BRCA -/-")
+mean(cbe7_ttd[cbe7_ttd$chr == "chrY", ]$cov)
+print("mean coverage chrY BRCA -/- filtered")
+mean(cbe7_ttd_filt[cbe7_ttd_filt$chr == "chrY", ]$cov)
+```
+
+
