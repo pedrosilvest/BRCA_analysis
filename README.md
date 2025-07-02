@@ -1,6 +1,6 @@
 # BRCA_github
 
-This repository contains scripts and analysis workflows for processing and analyzing BRCA whole-genome sequencing (WGS) data — from raw FASTQ files to somatic variant calling and downstream analysis.
+This repository contains scripts and analysis workflows for processing and analyzing BRCA whole-genome sequencing (WGS) data, from raw FASTQ files to somatic variant calling and downstream analysis.
 
 ---
 
