@@ -8,7 +8,7 @@ This repository contains scripts and analysis workflows for processing and analy
 
 ```
 
-BRCA\_github/
+BRCA_github/
 ├── scripts/
 │   ├── \[scripts to run somatic tools: Brass, Gridss, Manta, Caveman...]
 │   └── create\_scripts/
@@ -35,7 +35,7 @@ BRCA\_github/
    - Custom filtering and statistical summaries
 
 ---
-````
+```
 
 ### 2. Execution
 
